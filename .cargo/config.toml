@@ -1,0 +1,11 @@
+[build]
+target = "thumbv7m-none-eabi"
+
+[target.thumbv7m-none-eabi]
+rustflags = [
+  "-C", "link-arg=-Tlink.x",
+]
+runner = "./flash.sh"
+
+[env]
+STM_SERIAL_PORT="/dev/cu.usbserial-110"
