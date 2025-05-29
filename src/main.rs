@@ -2,40 +2,27 @@
 #![no_main]
 
 // https://dev.to/theembeddedrustacean/embedded-rust-embassy-gpio-button-controlled-blinking-3ee6
+// https://www.youtube.com/watch?v=dab_vzVDr_M
 
-use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_executor::Spawner;
+use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::usart::{Config, Uart};
 use embassy_stm32::{bind_interrupts, peripherals, usart};
-use embassy_stm32::{
-    exti::ExtiInput,
-    gpio::{AnyPin, Level, Output, Pin, Pull, Speed},
-};
-use embassy_time::{Duration, Timer};
+use embassy_time::Timer;
 use panic_halt as _;
 
-static BLINK_MS: AtomicU32 = AtomicU32::new(0);
+mod trafficlight;
+use trafficlight::TrafficLight;
 
-#[embassy_executor::task]
-async fn led_task(led: AnyPin) {
-    let mut led = Output::new(led, Level::Low, Speed::Low);
-
-    loop {
-        let delay = BLINK_MS.load(Ordering::Relaxed);
-        Timer::after(Duration::from_millis(delay.into())).await;
-        led.toggle();
-    }
+// Deal with active-high or active-low, so that the state machine can just use
+// easy to understand `true` for on logic.
+fn light(led: &mut Output, on: bool) -> () {
+    led.set_level(if on { Level::High } else { Level::Low });
 }
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let peripherals = embassy_stm32::init(Default::default());
-
-    let mut button = ExtiInput::new(peripherals.PE11, peripherals.EXTI11, Pull::Up);
-
-    let mut delay_value_ms = 2_000;
-    BLINK_MS.store(delay_value_ms, Ordering::Relaxed);
-    spawner.spawn(led_task(peripherals.PE12.degrade())).unwrap();
 
     bind_interrupts!(struct Irqs {
         USART1 => usart::InterruptHandler<peripherals::USART1>;
@@ -51,18 +38,19 @@ async fn main(spawner: Spawner) {
     )
     .unwrap();
 
+    let mut led_red = Output::new(peripherals.PB10, Level::Low, Speed::Low);
+    let mut led_amber = Output::new(peripherals.PB12, Level::Low, Speed::Low);
+    let mut led_green = Output::new(peripherals.PB14, Level::Low, Speed::Low);
+
+    let mut trafficlight = TrafficLight::new();
+
     loop {
-        button.wait_for_low().await;
-        delay_value_ms = delay_value_ms / 2;
-        if delay_value_ms < 50 {
-            delay_value_ms = 2_000;
-        }
-        BLINK_MS.store(delay_value_ms, Ordering::Relaxed);
+        usart.write(b"start of phase...\n").await.unwrap();
+        light(&mut led_red, trafficlight.red());
+        light(&mut led_amber, trafficlight.amber());
+        light(&mut led_green, trafficlight.green());
 
-        usart.write(b"changing speed...\n").await.unwrap();
-
-        // debounce....
-        Timer::after_millis(200).await;
-        button.wait_for_high().await;
+        Timer::after_millis(trafficlight.phase_time_seconds() * 1000).await;
+        trafficlight.to_next_phase();
     }
 }
