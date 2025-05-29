@@ -5,9 +5,7 @@
 // https://www.youtube.com/watch?v=dab_vzVDr_M
 
 use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::usart::{Config, Uart};
-use embassy_stm32::{bind_interrupts, peripherals, usart};
+use embassy_stm32::gpio::{AnyPin, Level, Output, Pin, Speed};
 use embassy_time::Timer;
 use panic_halt as _;
 
@@ -16,41 +14,53 @@ use trafficlight::TrafficLight;
 
 // Deal with active-high or active-low, so that the state machine can just use
 // easy to understand `true` for on logic.
-fn light(led: &mut Output, on: bool) -> () {
+fn light(led: &mut Output, on: bool) {
     led.set_level(if on { Level::High } else { Level::Low });
+}
+
+#[embassy_executor::task(pool_size = 2)]
+async fn trafficlight_task(pin_red: AnyPin, pin_amber: AnyPin, pin_green: AnyPin) {
+    let mut red = Output::new(pin_red, Level::Low, Speed::Low);
+    let mut amber = Output::new(pin_amber, Level::Low, Speed::Low);
+    let mut green = Output::new(pin_green, Level::Low, Speed::Low);
+
+    let mut trafficlight = TrafficLight::new();
+    loop {
+        light(&mut red, trafficlight.red());
+        light(&mut amber, trafficlight.amber());
+        light(&mut green, trafficlight.green());
+
+        Timer::after_millis(trafficlight.phase_time_seconds() * 1000).await;
+        trafficlight.to_next_phase();
+    }
 }
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let peripherals = embassy_stm32::init(Default::default());
 
-    bind_interrupts!(struct Irqs {
-        USART1 => usart::InterruptHandler<peripherals::USART1>;
-    });
-    let mut usart = Uart::new(
-        peripherals.USART1,
-        peripherals.PA10,
-        peripherals.PA9,
-        Irqs,
-        peripherals.DMA1_CH4,
-        peripherals.DMA1_CH5,
-        Config::default(), // 115200 baud
-    )
-    .unwrap();
+    spawner
+        .spawn(trafficlight_task(
+            peripherals.PB10.degrade(),
+            peripherals.PB12.degrade(),
+            peripherals.PB14.degrade(),
+        ))
+        .unwrap();
+    spawner
+        .spawn(trafficlight_task(
+            peripherals.PB7.degrade(),
+            peripherals.PB9.degrade(),
+            peripherals.PE1.degrade(),
+        ))
+        .unwrap();
 
-    let mut led_red = Output::new(peripherals.PB10, Level::Low, Speed::Low);
-    let mut led_amber = Output::new(peripherals.PB12, Level::Low, Speed::Low);
-    let mut led_green = Output::new(peripherals.PB14, Level::Low, Speed::Low);
-
-    let mut trafficlight = TrafficLight::new();
-
+    // Show and help count seconds by flashing the on-board LED roughly once
+    // every second.
+    let mut led4 = Output::new(peripherals.PE12, Level::Low, Speed::Low);
     loop {
-        usart.write(b"start of phase...\n").await.unwrap();
-        light(&mut led_red, trafficlight.red());
-        light(&mut led_amber, trafficlight.amber());
-        light(&mut led_green, trafficlight.green());
-
-        Timer::after_millis(trafficlight.phase_time_seconds() * 1000).await;
-        trafficlight.to_next_phase();
+        led4.set_low();
+        Timer::after_millis(15).await;
+        led4.set_high();
+        Timer::after_millis(985).await;
     }
 }
