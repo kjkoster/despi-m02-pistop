@@ -7,7 +7,7 @@
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{AnyPin, Level, Output, Pin, Speed};
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
+    blocking_mutex::raw::ThreadModeRawMutex,
     semaphore::{FairSemaphore, Semaphore},
 };
 use embassy_time::Timer;
@@ -18,7 +18,7 @@ use trafficlight::TrafficLight;
 
 const NUM_TRAFFICLIGHTS: usize = 2;
 
-type CrossingSemaphore = FairSemaphore<CriticalSectionRawMutex, NUM_TRAFFICLIGHTS>;
+type CrossingSemaphore = FairSemaphore<ThreadModeRawMutex, NUM_TRAFFICLIGHTS>;
 static CROSSING_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(1);
 
 // Deal with active-high or active-low, so that the state machine can just use
