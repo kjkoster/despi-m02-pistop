@@ -6,11 +6,20 @@
 
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{AnyPin, Level, Output, Pin, Speed};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    semaphore::{FairSemaphore, Semaphore},
+};
 use embassy_time::Timer;
 use panic_halt as _;
 
 mod trafficlight;
 use trafficlight::TrafficLight;
+
+const NUM_TRAFFICLIGHTS: usize = 2;
+
+type CrossingSemaphore = FairSemaphore<CriticalSectionRawMutex, NUM_TRAFFICLIGHTS>;
+static CROSSING_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(1);
 
 // Deal with active-high or active-low, so that the state machine can just use
 // easy to understand `true` for on logic.
@@ -18,20 +27,33 @@ fn light(led: &mut Output, on: bool) {
     led.set_level(if on { Level::High } else { Level::Low });
 }
 
-#[embassy_executor::task(pool_size = 2)]
+#[embassy_executor::task(pool_size = NUM_TRAFFICLIGHTS)]
 async fn trafficlight_task(pin_red: AnyPin, pin_amber: AnyPin, pin_green: AnyPin) {
     let mut red = Output::new(pin_red, Level::Low, Speed::Low);
     let mut amber = Output::new(pin_amber, Level::Low, Speed::Low);
     let mut green = Output::new(pin_green, Level::Low, Speed::Low);
 
     let mut trafficlight = TrafficLight::new();
+    let mut holds_permit = false;
     loop {
         light(&mut red, trafficlight.red());
         light(&mut amber, trafficlight.amber());
         light(&mut green, trafficlight.green());
 
         Timer::after_millis(trafficlight.phase_time_seconds() * 1000).await;
+
         trafficlight.to_next_phase();
+        match (holds_permit, trafficlight.needs_permit()) {
+            (false, true) => {
+                CROSSING_SEMAPHORE.acquire(1).await.unwrap().disarm();
+                holds_permit = true;
+            }
+            (true, false) => {
+                CROSSING_SEMAPHORE.release(1);
+                holds_permit = false;
+            }
+            (false, false) | (true, true) => {}
+        }
     }
 }
 
