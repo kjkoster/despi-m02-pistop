@@ -63,16 +63,16 @@ async fn main(spawner: Spawner) {
 
     spawner
         .spawn(trafficlight_task(
-            peripherals.PB10.degrade(),
-            peripherals.PB12.degrade(),
-            peripherals.PB14.degrade(),
+            peripherals.PE1.degrade(),
+            peripherals.PB9.degrade(),
+            peripherals.PB7.degrade(),
         ))
         .unwrap();
     spawner
         .spawn(trafficlight_task(
-            peripherals.PB7.degrade(),
-            peripherals.PB9.degrade(),
-            peripherals.PE1.degrade(),
+            peripherals.PB6.degrade(),
+            peripherals.PB8.degrade(),
+            peripherals.PE0.degrade(),
         ))
         .unwrap();
 
