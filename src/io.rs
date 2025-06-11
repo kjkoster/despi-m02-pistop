@@ -5,7 +5,9 @@
  * I/O pins on the device. The intention is for this module to be the only part
  * of the program that is device-specific.
  *
- * This module exports a few(?) types and Embassy tasks(?). Other tasks can send messages into the I/O task via channels.
+ * This module exports a few types and an Embassy I/O task. Other tasks can send
+ * messages into the I/O task via channels and read the on-board button via a
+ * signal.
  */
 
 use embassy_futures::select::{Either3, select3};
@@ -73,7 +75,7 @@ pub async fn io_task(
         match select3(
             rags.receive(),
             blinky.receive(),
-            onboard_button.wait_for_low(),
+            onboard_button.wait_for_falling_edge(),
         )
         .await
         {
