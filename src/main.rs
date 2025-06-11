@@ -4,106 +4,189 @@
 // https://dev.to/theembeddedrustacean/embedded-rust-embassy-gpio-button-controlled-blinking-3ee6
 // https://www.youtube.com/watch?v=dab_vzVDr_M
 
+mod io;
+use io::{CHANNEL_CAPACITY, Leg, Rag, io_task};
+
 use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_executor::Spawner;
-use embassy_stm32::{
-    exti::{AnyChannel, Channel, ExtiInput},
-    gpio::{AnyPin, Level, Output, Pin, Pull, Speed},
+use embassy_sync::{
+    blocking_mutex::raw::ThreadModeRawMutex,
+    channel::{Channel, Sender},
+    semaphore::{FairSemaphore, Semaphore},
+    signal::Signal,
 };
 use embassy_time::Timer;
 use panic_halt as _;
 
-mod trafficlight;
-use trafficlight::TrafficLight;
-use trafficlight::semaphore::{NUM_TRAFFICLIGHTS, acquire_permit, release_permit};
+const NUM_NORMAL_MODE_TASKS: usize = 2;
+const NUM_FLASH_MODE_TASKS: usize = 1;
+const NUM_FLASH_BUTTON_TASKS: usize = 1;
+// Strictly speaking, the queue in this type is too large for the actual number
+// of tasks, but I'd have to calculate the max of the two num_somethings. Maybe
+// I'll get round to that some other time,
+const NUM_TASKS: usize = NUM_NORMAL_MODE_TASKS + NUM_FLASH_MODE_TASKS + NUM_FLASH_BUTTON_TASKS;
 
-static MAINTENANCE_MODE: AtomicBool = AtomicBool::new(false);
+type CrossingSemaphore = FairSemaphore<ThreadModeRawMutex, NUM_TASKS>;
+static NORMAL_MODE_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(1);
+static FLASH_MODE_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
+static IN_FLASH_MODE: AtomicBool = AtomicBool::new(false);
 
-// Deal with active-high or active-low, so that the state machine can just use
-// easy to understand `true` for on logic.
-fn light(led: &mut Output, on: bool) {
-    led.set_level(if on { Level::High } else { Level::Low });
-}
+static RAGS: Channel<ThreadModeRawMutex, Rag, CHANNEL_CAPACITY> = Channel::new();
+static BLINKY: Channel<ThreadModeRawMutex, bool, CHANNEL_CAPACITY> = Channel::new();
+static ONBOARD_BUTTON_RAW: Signal<ThreadModeRawMutex, bool> = Signal::new();
 
-#[embassy_executor::task(pool_size = NUM_TRAFFICLIGHTS)]
-async fn trafficlight_task(pin_red: AnyPin, pin_amber: AnyPin, pin_green: AnyPin) {
-    let mut red = Output::new(pin_red, Level::High, Speed::Low);
-    let mut amber = Output::new(pin_amber, Level::Low, Speed::Low);
-    let mut green = Output::new(pin_green, Level::Low, Speed::Low);
-
-    let mut trafficlight = TrafficLight::new();
+#[embassy_executor::task(pool_size = NUM_NORMAL_MODE_TASKS)]
+async fn normal_mode_task(
+    leg: Leg,
+    semaphore: &'static CrossingSemaphore,
+    rags: Sender<'static, ThreadModeRawMutex, Rag, CHANNEL_CAPACITY>,
+) {
     loop {
-        Timer::after_millis(trafficlight.phase_time_seconds() * 1000).await;
+        // Red Phase
+        rags.send(Rag::new(leg, true, false, false)).await;
+        Timer::after_millis(10_000).await;
 
-        trafficlight
-            .go_to_next_phase(MAINTENANCE_MODE.load(Ordering::Relaxed))
-            .await;
+        {
+            // we use this scope to safely hold the permit from the semaphore
+            // for normal run mode.
+            let _permit = semaphore.acquire(1).await.unwrap();
 
-        light(&mut red, trafficlight.red());
-        light(&mut amber, trafficlight.amber());
-        light(&mut green, trafficlight.green());
+            // Attention Phase
+            rags.send(Rag::new(leg, true, true, false)).await;
+            Timer::after_millis(1_500).await;
+
+            // Go Phase
+            rags.send(Rag::new(leg, false, false, true)).await;
+            Timer::after_millis(4_000).await;
+
+            // Yield Phase
+            rags.send(Rag::new(leg, false, true, false)).await;
+            Timer::after_millis(3_000).await;
+
+            // Clear Crossring Phase
+            rags.send(Rag::new(leg, true, false, false)).await;
+            Timer::after_millis(2_000).await;
+
+            // _permit is released here...
+        }
     }
 }
 
-#[embassy_executor::task]
-async fn maintenance_button_task(pin_button: AnyPin, interrupt_channel: AnyChannel) {
-    let mut button = ExtiInput::new(pin_button, interrupt_channel, Pull::Up);
-
+#[embassy_executor::task(pool_size = NUM_FLASH_MODE_TASKS)]
+async fn flash_mode_task(
+    semaphore: &'static CrossingSemaphore,
+    in_flash_mode: &'static AtomicBool,
+    rags: Sender<'static, ThreadModeRawMutex, Rag, CHANNEL_CAPACITY>,
+) {
     loop {
-        button.wait_for_low().await;
+        // Red Phase
+        rags.send(Rag::new(Leg::A, true, false, false)).await;
+        rags.send(Rag::new(Leg::B, true, false, false)).await;
+        Timer::after_millis(1_000).await;
 
-        // XXX no: both lights need to be in `Phase::Stop` before I can enable maintenance mode.
-        //
-        MAINTENANCE_MODE.fetch_not(Ordering::Relaxed);
-        if MAINTENANCE_MODE.load(Ordering::Relaxed) {
-            acquire_permit().await;
+        {
+            // we use this scope to safely hold the permit from the semaphore
+            // for normal run mode.
+            let _permit = semaphore.acquire(1).await.unwrap();
+
+            while in_flash_mode.load(Ordering::Relaxed) {
+                // Flash On Phase
+                rags.send(Rag::new(Leg::A, false, true, false)).await;
+                rags.send(Rag::new(Leg::B, false, true, false)).await;
+                Timer::after_millis(1_000).await;
+
+                // Flash Off Phase
+                rags.send(Rag::new(Leg::A, false, false, false)).await;
+                rags.send(Rag::new(Leg::B, false, false, false)).await;
+                Timer::after_millis(1_000).await;
+            }
+
+            // Clear Crossring Phase
+            rags.send(Rag::new(Leg::A, true, false, false)).await;
+            rags.send(Rag::new(Leg::B, true, false, false)).await;
+            Timer::after_millis(2_000).await;
+
+            // _permit is released here...
+        }
+    }
+}
+
+#[embassy_executor::task(pool_size = NUM_FLASH_BUTTON_TASKS)]
+async fn flash_button_task(
+    normal_mode_semaphore: &'static CrossingSemaphore,
+    flash_mode_semaphore: &'static CrossingSemaphore,
+    in_flash_mode: &'static AtomicBool,
+    onboard_button_raw: &'static Signal<ThreadModeRawMutex, bool>,
+) {
+    loop {
+        onboard_button_raw.wait().await;
+
+        in_flash_mode.fetch_not(Ordering::Relaxed);
+
+        if in_flash_mode.load(Ordering::Relaxed) {
+            normal_mode_semaphore.acquire(1).await.unwrap().disarm();
+            flash_mode_semaphore.release(1);
         } else {
-            release_permit();
+            flash_mode_semaphore.acquire(1).await.unwrap().disarm();
+            normal_mode_semaphore.release(1);
         }
 
         // debounce....
         Timer::after_millis(200).await;
-        button.wait_for_high().await;
     }
 }
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let peripherals = embassy_stm32::init(Default::default());
-
     spawner
-        .spawn(trafficlight_task(
-            peripherals.PE1.degrade(),
-            peripherals.PB9.degrade(),
-            peripherals.PB7.degrade(),
+        .spawn(io_task(
+            RAGS.receiver(),
+            BLINKY.receiver(),
+            &ONBOARD_BUTTON_RAW,
         ))
         .unwrap();
     spawner
-        .spawn(trafficlight_task(
-            peripherals.PB6.degrade(),
-            peripherals.PB8.degrade(),
-            peripherals.PE0.degrade(),
+        .spawn(normal_mode_task(
+            Leg::A,
+            &NORMAL_MODE_SEMAPHORE,
+            RAGS.sender(),
         ))
         .unwrap();
     spawner
-        .spawn(maintenance_button_task(
-            peripherals.PE11.degrade(),
-            peripherals.EXTI11.degrade(),
+        .spawn(normal_mode_task(
+            Leg::B,
+            &NORMAL_MODE_SEMAPHORE,
+            RAGS.sender(),
+        ))
+        .unwrap();
+    spawner
+        .spawn(flash_mode_task(
+            &FLASH_MODE_SEMAPHORE,
+            &IN_FLASH_MODE,
+            RAGS.sender(),
+        ))
+        .unwrap();
+    spawner
+        .spawn(flash_button_task(
+            &NORMAL_MODE_SEMAPHORE,
+            &FLASH_MODE_SEMAPHORE,
+            &IN_FLASH_MODE,
+            &ONBOARD_BUTTON_RAW,
         ))
         .unwrap();
 
     // Show and help count seconds by flashing the on-board LED roughly once
-    // every second.
-    let mut led4 = Output::new(peripherals.PE12, Level::Low, Speed::Low);
+    // every second. In normal mode we just flash, in maintenance mode we blink
+    // on an off.
     loop {
-        led4.set_low();
-        if MAINTENANCE_MODE.load(Ordering::Relaxed) {
+        BLINKY.send(true).await;
+        if IN_FLASH_MODE.load(Ordering::Relaxed) {
             Timer::after_millis(500).await;
         } else {
             Timer::after_millis(15).await;
         }
-        led4.set_high();
-        if MAINTENANCE_MODE.load(Ordering::Relaxed) {
+        BLINKY.send(false).await;
+        if IN_FLASH_MODE.load(Ordering::Relaxed) {
             Timer::after_millis(500).await;
         } else {
             Timer::after_millis(985).await;
