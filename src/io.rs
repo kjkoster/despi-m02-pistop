@@ -19,7 +19,7 @@ use embassy_sync::{
     blocking_mutex::raw::ThreadModeRawMutex,
     channel::{Receiver, Sender},
 };
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 
 #[derive(Copy, Clone)]
 pub enum Leg {
@@ -83,12 +83,10 @@ pub async fn io_task(
         )
         .await
         {
-            Either3::First(rag) => match rag.leg {
-                Leg::A => light(&mut outputs_a, &rag),
-                Leg::B => light(&mut outputs_b, &rag),
-            },
+            Either3::First(rag @ Rag { leg: Leg::A, .. }) => light(&mut outputs_a, &rag),
+            Either3::First(rag @ Rag { leg: Leg::B, .. }) => light(&mut outputs_b, &rag),
             Either3::Second(blinky_on) => {
-                // on-board LED is active-low
+                // the on-board LED is active-low
                 onboard_led.set_level(if blinky_on { Level::Low } else { Level::High })
             }
             Either3::Third(_) => onboard_button_raw.send(true).await,
@@ -118,13 +116,13 @@ fn light(outputs: &mut [Output; 3], rag: &Rag) {
 pub async fn debounce_task(
     input: Receiver<'static, ThreadModeRawMutex, bool, CHANNEL_CAPACITY>,
     output: Sender<'static, ThreadModeRawMutex, bool, CHANNEL_CAPACITY>,
-    debounce_millis: u64,
-) {
+    debounce: Duration,
+) -> ! {
     loop {
         let mut value: bool = input.receive().await;
 
         'debounce_loop: loop {
-            match select(input.receive(), Timer::after_millis(debounce_millis)).await {
+            match select(input.receive(), Timer::after(debounce)).await {
                 Either::First(new_value) => value = new_value,
                 Either::Second(_) => break 'debounce_loop,
             }

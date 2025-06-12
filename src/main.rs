@@ -15,7 +15,7 @@ use embassy_sync::{
     channel::{Channel, Receiver, Sender},
     semaphore::{FairSemaphore, Semaphore},
 };
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 use panic_halt as _;
 
 const NUM_NORMAL_MODE_TASKS: usize = 2;
@@ -56,7 +56,7 @@ async fn normal_mode_task(
     leg: Leg,
     semaphore: &'static CrossingSemaphore,
     rags: Sender<'static, ThreadModeRawMutex, Rag, CHANNEL_CAPACITY>,
-) {
+) -> ! {
     loop {
         // Red Phase
         rags.send(Rag::new(leg, true, false, false)).await;
@@ -93,7 +93,7 @@ async fn flash_mode_task(
     semaphore: &'static CrossingSemaphore,
     system_mode: &'static AtomicSystemMode,
     rags: Sender<'static, ThreadModeRawMutex, Rag, CHANNEL_CAPACITY>,
-) {
+) -> ! {
     loop {
         // Red Phase
         rags.send(Rag::new(Leg::A, true, false, false)).await;
@@ -138,7 +138,7 @@ async fn flash_button_task(
     flash_mode_semaphore: &'static CrossingSemaphore,
     system_mode: &'static AtomicSystemMode,
     onboard_button: Receiver<'static, ThreadModeRawMutex, bool, CHANNEL_CAPACITY>,
-) {
+) -> ! {
     // As we start, we hold all the permits. This effectively blocks the traffic
     // light tasks from running, as they will be waiting for a permit to become
     // available. Permits are represented as boolean values, since we can only
@@ -184,7 +184,7 @@ fn ensure_released(permit: &mut bool, semaphore: &'static CrossingSemaphore) {
 }
 
 #[embassy_executor::main]
-async fn main(spawner: Spawner) {
+async fn main(spawner: Spawner) -> ! {
     spawner
         .spawn(io_task(
             RAGS.receiver(),
@@ -196,7 +196,7 @@ async fn main(spawner: Spawner) {
         .spawn(debounce_task(
             ONBOARD_BUTTON_RAW.receiver(),
             ONBOARD_BUTTON.sender(),
-            500, // milliseconds debounce time
+            Duration::from_millis(500),
         ))
         .unwrap();
     spawner
