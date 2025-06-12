@@ -5,16 +5,15 @@
 // https://www.youtube.com/watch?v=dab_vzVDr_M
 
 mod io;
-use io::{CHANNEL_CAPACITY, Leg, Rag, io_task};
+use io::{CHANNEL_CAPACITY, Leg, Rag, debounce_task, io_task};
 
 use atomic_enum::atomic_enum;
 use core::sync::atomic::Ordering;
 use embassy_executor::Spawner;
 use embassy_sync::{
     blocking_mutex::raw::ThreadModeRawMutex,
-    channel::{Channel, Sender},
+    channel::{Channel, Receiver, Sender},
     semaphore::{FairSemaphore, Semaphore},
-    signal::Signal,
 };
 use embassy_time::Timer;
 use panic_halt as _;
@@ -49,7 +48,8 @@ impl AtomicSystemMode {
 
 static RAGS: Channel<ThreadModeRawMutex, Rag, CHANNEL_CAPACITY> = Channel::new();
 static BLINKY: Channel<ThreadModeRawMutex, bool, CHANNEL_CAPACITY> = Channel::new();
-static ONBOARD_BUTTON_RAW: Signal<ThreadModeRawMutex, bool> = Signal::new();
+static ONBOARD_BUTTON_RAW: Channel<ThreadModeRawMutex, bool, CHANNEL_CAPACITY> = Channel::new();
+static ONBOARD_BUTTON: Channel<ThreadModeRawMutex, bool, CHANNEL_CAPACITY> = Channel::new();
 
 #[embassy_executor::task(pool_size = NUM_NORMAL_MODE_TASKS)]
 async fn normal_mode_task(
@@ -137,7 +137,7 @@ async fn flash_button_task(
     normal_mode_semaphore: &'static CrossingSemaphore,
     flash_mode_semaphore: &'static CrossingSemaphore,
     system_mode: &'static AtomicSystemMode,
-    onboard_button_raw: &'static Signal<ThreadModeRawMutex, bool>,
+    onboard_button: Receiver<'static, ThreadModeRawMutex, bool, CHANNEL_CAPACITY>,
 ) {
     // As we start, we hold all the permits. This effectively blocks the traffic
     // light tasks from running, as they will be waiting for a permit to become
@@ -165,10 +165,7 @@ async fn flash_button_task(
             }
         }
 
-        // Ignore events for a bit in order to debounce, before we await the
-        // user pressing the on-board pushbutton to switch to the next mode.
-        Timer::after_millis(200).await;
-        onboard_button_raw.wait().await;
+        _ = onboard_button.receive().await;
         system_mode.to_next_mode();
     }
 }
@@ -192,7 +189,14 @@ async fn main(spawner: Spawner) {
         .spawn(io_task(
             RAGS.receiver(),
             BLINKY.receiver(),
-            &ONBOARD_BUTTON_RAW,
+            ONBOARD_BUTTON_RAW.sender(),
+        ))
+        .unwrap();
+    spawner
+        .spawn(debounce_task(
+            ONBOARD_BUTTON_RAW.receiver(),
+            ONBOARD_BUTTON.sender(),
+            500, // milliseconds debounce time
         ))
         .unwrap();
     spawner
@@ -221,7 +225,7 @@ async fn main(spawner: Spawner) {
             &NORMAL_MODE_SEMAPHORE,
             &FLASH_MODE_SEMAPHORE,
             &SYSTEM_MODE,
-            &ONBOARD_BUTTON_RAW,
+            ONBOARD_BUTTON.receiver(),
         ))
         .unwrap();
 
