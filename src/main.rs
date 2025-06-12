@@ -20,28 +20,36 @@ use panic_halt as _;
 
 const NUM_NORMAL_MODE_TASKS: usize = 2;
 const NUM_FLASH_MODE_TASKS: usize = 1;
+const NUM_PRIORITY_TASKS: usize = 2;
 const NUM_FLASH_BUTTON_TASKS: usize = 1;
 // Strictly speaking, the queue in this type is too large for the actual number
 // of tasks, but I'd have to calculate the max of the two num_somethings. Maybe
 // I'll get round to that some other time,
-const NUM_TASKS: usize = NUM_NORMAL_MODE_TASKS + NUM_FLASH_MODE_TASKS + NUM_FLASH_BUTTON_TASKS;
+const NUM_TASKS: usize =
+    NUM_NORMAL_MODE_TASKS + NUM_FLASH_MODE_TASKS + NUM_PRIORITY_TASKS + NUM_FLASH_BUTTON_TASKS;
 
 type CrossingSemaphore = FairSemaphore<ThreadModeRawMutex, NUM_TASKS>;
 static NORMAL_MODE_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
 static FLASH_MODE_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
+static PRIORITY_A_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
+static PRIORITY_B_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
 
 #[atomic_enum]
 #[derive(PartialEq, Eq)]
 enum SystemMode {
     Normal,
     Flash,
+    PriorityA,
+    PriorityB,
 }
 static SYSTEM_MODE: AtomicSystemMode = AtomicSystemMode::new(SystemMode::Normal);
 impl AtomicSystemMode {
     fn to_next_mode(&self) {
         match self.load(Ordering::Relaxed) {
             SystemMode::Normal => self.store(SystemMode::Flash, Ordering::Relaxed),
-            SystemMode::Flash => self.store(SystemMode::Normal, Ordering::Relaxed),
+            SystemMode::Flash => self.store(SystemMode::PriorityA, Ordering::Relaxed),
+            SystemMode::PriorityA => self.store(SystemMode::PriorityB, Ordering::Relaxed),
+            SystemMode::PriorityB => self.store(SystemMode::Normal, Ordering::Relaxed),
         }
     }
 }
@@ -58,33 +66,27 @@ async fn normal_mode_task(
     rags: Sender<'static, ThreadModeRawMutex, Rag, CHANNEL_CAPACITY>,
 ) -> ! {
     loop {
-        // Red Phase
+        // we use this scope to safely hold the permit from the semaphore
+        // for normal run mode.
+        let _permit = semaphore.acquire(1).await.unwrap();
+
+        // Attention Phase
+        rags.send(Rag::new(leg, true, true, false)).await;
+        Timer::after_millis(1_500).await;
+
+        // Go Phase
+        rags.send(Rag::new(leg, false, false, true)).await;
+        Timer::after_millis(4_000).await;
+
+        // Yield Phase
+        rags.send(Rag::new(leg, false, true, false)).await;
+        Timer::after_millis(3_000).await;
+
+        // Clear Crossring Phase
         rags.send(Rag::new(leg, true, false, false)).await;
-        Timer::after_millis(10_000).await;
+        Timer::after_millis(2_000).await;
 
-        {
-            // we use this scope to safely hold the permit from the semaphore
-            // for normal run mode.
-            let _permit = semaphore.acquire(1).await.unwrap();
-
-            // Attention Phase
-            rags.send(Rag::new(leg, true, true, false)).await;
-            Timer::after_millis(1_500).await;
-
-            // Go Phase
-            rags.send(Rag::new(leg, false, false, true)).await;
-            Timer::after_millis(4_000).await;
-
-            // Yield Phase
-            rags.send(Rag::new(leg, false, true, false)).await;
-            Timer::after_millis(3_000).await;
-
-            // Clear Crossring Phase
-            rags.send(Rag::new(leg, true, false, false)).await;
-            Timer::after_millis(2_000).await;
-
-            // _permit is released here...
-        }
+        // _permit is released here...
     }
 }
 
@@ -95,40 +97,75 @@ async fn flash_mode_task(
     rags: Sender<'static, ThreadModeRawMutex, Rag, CHANNEL_CAPACITY>,
 ) -> ! {
     loop {
-        // Red Phase
-        rags.send(Rag::new(Leg::A, true, false, false)).await;
-        rags.send(Rag::new(Leg::B, true, false, false)).await;
-        Timer::after_millis(1_000).await;
+        // we use this scope to safely hold the permit from the semaphore
+        // for normal run mode.
+        let _permit = semaphore.acquire(1).await.unwrap();
 
-        {
-            // we use this scope to safely hold the permit from the semaphore
-            // for normal run mode.
-            let _permit = semaphore.acquire(1).await.unwrap();
-
-            while system_mode.load(Ordering::Relaxed) == SystemMode::Flash {
-                // Flash On Phase
-                rags.send(Rag::new(Leg::A, false, true, false)).await;
-                rags.send(Rag::new(Leg::B, false, true, false)).await;
-                Timer::after_millis(1_000).await;
-
-                // Flash Off Phase
-                rags.send(Rag::new(Leg::A, false, false, false)).await;
-                rags.send(Rag::new(Leg::B, false, false, false)).await;
-                Timer::after_millis(1_000).await;
-            }
-
-            // Yield Phase
+        while system_mode.load(Ordering::Relaxed) == SystemMode::Flash {
+            // Flash On Phase
             rags.send(Rag::new(Leg::A, false, true, false)).await;
             rags.send(Rag::new(Leg::B, false, true, false)).await;
-            Timer::after_millis(3_000).await;
+            Timer::after_millis(1_000).await;
 
-            // Clear Crossring Phase
-            rags.send(Rag::new(Leg::A, true, false, false)).await;
-            rags.send(Rag::new(Leg::B, true, false, false)).await;
-            Timer::after_millis(2_000).await;
-
-            // _permit is released here...
+            // Flash Off Phase
+            rags.send(Rag::new(Leg::A, false, false, false)).await;
+            rags.send(Rag::new(Leg::B, false, false, false)).await;
+            Timer::after_millis(1_000).await;
         }
+
+        // Yield Phase
+        rags.send(Rag::new(Leg::A, false, true, false)).await;
+        rags.send(Rag::new(Leg::B, false, true, false)).await;
+        Timer::after_millis(3_000).await;
+
+        // Clear Crossring Phase
+        rags.send(Rag::new(Leg::A, true, false, false)).await;
+        rags.send(Rag::new(Leg::B, true, false, false)).await;
+        Timer::after_millis(2_000).await;
+
+        // _permit is released here...
+    }
+}
+
+#[embassy_executor::task(pool_size = NUM_PRIORITY_TASKS)]
+async fn priority_mode_task(
+    leg: Leg,
+    semaphore: &'static CrossingSemaphore,
+    system_mode: &'static AtomicSystemMode,
+    rags: Sender<'static, ThreadModeRawMutex, Rag, CHANNEL_CAPACITY>,
+) -> ! {
+    let my_mode = if leg == Leg::A {
+        SystemMode::PriorityA
+    } else {
+        SystemMode::PriorityB
+    };
+    loop {
+        // we use this scope to safely hold the permit from the semaphore
+        // for normal run mode.
+        let _permit = semaphore.acquire(1).await.unwrap();
+
+        // Attention Phase
+        rags.send(Rag::new(leg, true, true, false)).await;
+        Timer::after_millis(1_500).await;
+
+        // Go Phase
+        rags.send(Rag::new(leg, false, false, true)).await;
+        Timer::after_millis(4_000).await;
+
+        // crude...
+        while system_mode.load(Ordering::Relaxed) == my_mode {
+            Timer::after_millis(500).await;
+        }
+
+        // Yield Phase
+        rags.send(Rag::new(leg, false, true, false)).await;
+        Timer::after_millis(3_000).await;
+
+        // Clear Crossring Phase
+        rags.send(Rag::new(leg, true, false, false)).await;
+        Timer::after_millis(2_000).await;
+
+        // _permit is released here...
     }
 }
 
@@ -136,6 +173,8 @@ async fn flash_mode_task(
 async fn flash_button_task(
     normal_mode_semaphore: &'static CrossingSemaphore,
     flash_mode_semaphore: &'static CrossingSemaphore,
+    priority_a_semaphore: &'static CrossingSemaphore,
+    priority_b_semaphore: &'static CrossingSemaphore,
     system_mode: &'static AtomicSystemMode,
     onboard_button: Receiver<'static, ThreadModeRawMutex, bool, CHANNEL_CAPACITY>,
 ) -> ! {
@@ -145,6 +184,8 @@ async fn flash_button_task(
     // ever have or have not one.
     let mut have_normal_permit: bool = true;
     let mut have_flash_permit: bool = true;
+    let mut have_priority_a_permit: bool = true;
+    let mut have_priority_b_permit: bool = true;
 
     loop {
         // At the program start, or after the mode is switched, we have to
@@ -157,11 +198,27 @@ async fn flash_button_task(
         match system_mode.load(Ordering::Relaxed) {
             SystemMode::Normal => {
                 ensure_aquired(&mut have_flash_permit, flash_mode_semaphore).await;
+                ensure_aquired(&mut have_priority_a_permit, priority_a_semaphore).await;
+                ensure_aquired(&mut have_priority_b_permit, priority_b_semaphore).await;
                 ensure_released(&mut have_normal_permit, normal_mode_semaphore);
             }
             SystemMode::Flash => {
                 ensure_aquired(&mut have_normal_permit, normal_mode_semaphore).await;
+                ensure_aquired(&mut have_priority_a_permit, priority_a_semaphore).await;
+                ensure_aquired(&mut have_priority_b_permit, priority_b_semaphore).await;
                 ensure_released(&mut have_flash_permit, flash_mode_semaphore);
+            }
+            SystemMode::PriorityA => {
+                ensure_aquired(&mut have_normal_permit, normal_mode_semaphore).await;
+                ensure_aquired(&mut have_flash_permit, flash_mode_semaphore).await;
+                ensure_aquired(&mut have_priority_b_permit, priority_b_semaphore).await;
+                ensure_released(&mut have_priority_a_permit, priority_a_semaphore);
+            }
+            SystemMode::PriorityB => {
+                ensure_aquired(&mut have_normal_permit, normal_mode_semaphore).await;
+                ensure_aquired(&mut have_flash_permit, flash_mode_semaphore).await;
+                ensure_aquired(&mut have_priority_a_permit, priority_a_semaphore).await;
+                ensure_released(&mut have_priority_b_permit, priority_b_semaphore);
             }
         }
 
@@ -214,6 +271,22 @@ async fn main(spawner: Spawner) -> ! {
         ))
         .unwrap();
     spawner
+        .spawn(priority_mode_task(
+            Leg::A,
+            &PRIORITY_A_SEMAPHORE,
+            &SYSTEM_MODE,
+            RAGS.sender(),
+        ))
+        .unwrap();
+    spawner
+        .spawn(priority_mode_task(
+            Leg::B,
+            &PRIORITY_B_SEMAPHORE,
+            &SYSTEM_MODE,
+            RAGS.sender(),
+        ))
+        .unwrap();
+    spawner
         .spawn(flash_mode_task(
             &FLASH_MODE_SEMAPHORE,
             &SYSTEM_MODE,
@@ -224,6 +297,8 @@ async fn main(spawner: Spawner) -> ! {
         .spawn(flash_button_task(
             &NORMAL_MODE_SEMAPHORE,
             &FLASH_MODE_SEMAPHORE,
+            &PRIORITY_A_SEMAPHORE,
+            &PRIORITY_B_SEMAPHORE,
             &SYSTEM_MODE,
             ONBOARD_BUTTON.receiver(),
         ))
@@ -241,6 +316,12 @@ async fn main(spawner: Spawner) -> ! {
             SystemMode::Flash => {
                 Timer::after_millis(500).await;
             }
+            SystemMode::PriorityA => {
+                Timer::after_millis(200).await;
+            }
+            SystemMode::PriorityB => {
+                Timer::after_millis(50).await;
+            }
         }
 
         BLINKY.send(false).await;
@@ -250,6 +331,12 @@ async fn main(spawner: Spawner) -> ! {
             }
             SystemMode::Flash => {
                 Timer::after_millis(500).await;
+            }
+            SystemMode::PriorityA => {
+                Timer::after_millis(200).await;
+            }
+            SystemMode::PriorityB => {
+                Timer::after_millis(50).await;
             }
         }
     }

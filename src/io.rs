@@ -21,7 +21,7 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Timer};
 
-#[derive(Copy, Clone)]
+#[derive(PartialEq, Eq, Copy, Clone)]
 pub enum Leg {
     A,
     B,
