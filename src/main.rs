@@ -27,12 +27,7 @@ const NUM_FLASH_BUTTON_TASKS: usize = 1;
 // I'll get round to that some other time,
 const NUM_TASKS: usize =
     NUM_NORMAL_MODE_TASKS + NUM_FLASH_MODE_TASKS + NUM_PRIORITY_TASKS + NUM_FLASH_BUTTON_TASKS;
-
 type CrossingSemaphore = FairSemaphore<ThreadModeRawMutex, NUM_TASKS>;
-static NORMAL_MODE_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
-static FLASH_MODE_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
-static PRIORITY_A_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
-static PRIORITY_B_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
 
 #[atomic_enum]
 #[derive(PartialEq, Eq)]
@@ -53,11 +48,6 @@ impl AtomicSystemMode {
         }
     }
 }
-
-static RAGS: Channel<ThreadModeRawMutex, Rag, CHANNEL_CAPACITY> = Channel::new();
-static BLINKY: Channel<ThreadModeRawMutex, bool, CHANNEL_CAPACITY> = Channel::new();
-static ONBOARD_BUTTON_RAW: Channel<ThreadModeRawMutex, bool, CHANNEL_CAPACITY> = Channel::new();
-static ONBOARD_BUTTON: Channel<ThreadModeRawMutex, bool, CHANNEL_CAPACITY> = Channel::new();
 
 #[embassy_executor::task(pool_size = NUM_NORMAL_MODE_TASKS)]
 async fn normal_mode_task(
@@ -242,6 +232,16 @@ fn ensure_released(permit: &mut bool, semaphore: &'static CrossingSemaphore) {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {
+    static NORMAL_MODE_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
+    static FLASH_MODE_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
+    static PRIORITY_A_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
+    static PRIORITY_B_SEMAPHORE: CrossingSemaphore = CrossingSemaphore::new(0);
+
+    static RAGS: Channel<ThreadModeRawMutex, Rag, CHANNEL_CAPACITY> = Channel::new();
+    static BLINKY: Channel<ThreadModeRawMutex, bool, CHANNEL_CAPACITY> = Channel::new();
+    static ONBOARD_BUTTON_RAW: Channel<ThreadModeRawMutex, bool, CHANNEL_CAPACITY> = Channel::new();
+    static ONBOARD_BUTTON: Channel<ThreadModeRawMutex, bool, CHANNEL_CAPACITY> = Channel::new();
+
     spawner
         .spawn(io_task(
             RAGS.receiver(),
