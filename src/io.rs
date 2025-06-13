@@ -22,23 +22,23 @@ use embassy_sync::{
 use embassy_time::{Duration, Timer};
 
 #[derive(PartialEq, Eq, Copy, Clone)]
-pub enum Leg {
+pub enum Lane {
     A,
     B,
 }
 
 #[derive(Copy, Clone)]
 pub struct Rag {
-    leg: Leg,
+    lane: Lane,
     red: bool,
     amber: bool,
     green: bool,
 }
 
 impl Rag {
-    pub fn new(leg: Leg, red: bool, amber: bool, green: bool) -> Self {
+    pub fn new(lane: Lane, red: bool, amber: bool, green: bool) -> Self {
         Self {
-            leg,
+            lane,
             red,
             amber,
             green,
@@ -83,8 +83,8 @@ pub async fn io_task(
         )
         .await
         {
-            Either3::First(rag @ Rag { leg: Leg::A, .. }) => light(&mut outputs_a, &rag),
-            Either3::First(rag @ Rag { leg: Leg::B, .. }) => light(&mut outputs_b, &rag),
+            Either3::First(rag @ Rag { lane: Lane::A, .. }) => light(&mut outputs_a, &rag),
+            Either3::First(rag @ Rag { lane: Lane::B, .. }) => light(&mut outputs_b, &rag),
             Either3::Second(blinky_on) => {
                 // the on-board LED is active-low
                 onboard_led.set_level(if blinky_on { Level::Low } else { Level::High })

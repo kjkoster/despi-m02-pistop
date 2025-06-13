@@ -5,7 +5,7 @@
 // https://www.youtube.com/watch?v=dab_vzVDr_M
 
 mod io;
-use io::{CHANNEL_CAPACITY, Leg, Rag, debounce_task, io_task};
+use io::{CHANNEL_CAPACITY, Lane, Rag, debounce_task, io_task};
 
 use atomic_enum::atomic_enum;
 use core::sync::atomic::Ordering;
@@ -61,7 +61,7 @@ static ONBOARD_BUTTON: Channel<ThreadModeRawMutex, bool, CHANNEL_CAPACITY> = Cha
 
 #[embassy_executor::task(pool_size = NUM_NORMAL_MODE_TASKS)]
 async fn normal_mode_task(
-    leg: Leg,
+    lane: Lane,
     semaphore: &'static CrossingSemaphore,
     rags: Sender<'static, ThreadModeRawMutex, Rag, CHANNEL_CAPACITY>,
 ) -> ! {
@@ -71,19 +71,19 @@ async fn normal_mode_task(
         let _permit = semaphore.acquire(1).await.unwrap();
 
         // Attention Phase
-        rags.send(Rag::new(leg, true, true, false)).await;
+        rags.send(Rag::new(lane, true, true, false)).await;
         Timer::after_millis(1_500).await;
 
         // Go Phase
-        rags.send(Rag::new(leg, false, false, true)).await;
+        rags.send(Rag::new(lane, false, false, true)).await;
         Timer::after_millis(4_000).await;
 
         // Yield Phase
-        rags.send(Rag::new(leg, false, true, false)).await;
+        rags.send(Rag::new(lane, false, true, false)).await;
         Timer::after_millis(3_000).await;
 
         // Clear Crossring Phase
-        rags.send(Rag::new(leg, true, false, false)).await;
+        rags.send(Rag::new(lane, true, false, false)).await;
         Timer::after_millis(2_000).await;
 
         // _permit is released here...
@@ -103,24 +103,24 @@ async fn flash_mode_task(
 
         while system_mode.load(Ordering::Relaxed) == SystemMode::Flash {
             // Flash On Phase
-            rags.send(Rag::new(Leg::A, false, true, false)).await;
-            rags.send(Rag::new(Leg::B, false, true, false)).await;
+            rags.send(Rag::new(Lane::A, false, true, false)).await;
+            rags.send(Rag::new(Lane::B, false, true, false)).await;
             Timer::after_millis(1_000).await;
 
             // Flash Off Phase
-            rags.send(Rag::new(Leg::A, false, false, false)).await;
-            rags.send(Rag::new(Leg::B, false, false, false)).await;
+            rags.send(Rag::new(Lane::A, false, false, false)).await;
+            rags.send(Rag::new(Lane::B, false, false, false)).await;
             Timer::after_millis(1_000).await;
         }
 
         // Yield Phase
-        rags.send(Rag::new(Leg::A, false, true, false)).await;
-        rags.send(Rag::new(Leg::B, false, true, false)).await;
+        rags.send(Rag::new(Lane::A, false, true, false)).await;
+        rags.send(Rag::new(Lane::B, false, true, false)).await;
         Timer::after_millis(3_000).await;
 
         // Clear Crossring Phase
-        rags.send(Rag::new(Leg::A, true, false, false)).await;
-        rags.send(Rag::new(Leg::B, true, false, false)).await;
+        rags.send(Rag::new(Lane::A, true, false, false)).await;
+        rags.send(Rag::new(Lane::B, true, false, false)).await;
         Timer::after_millis(2_000).await;
 
         // _permit is released here...
@@ -129,12 +129,12 @@ async fn flash_mode_task(
 
 #[embassy_executor::task(pool_size = NUM_PRIORITY_TASKS)]
 async fn priority_mode_task(
-    leg: Leg,
+    lane: Lane,
     semaphore: &'static CrossingSemaphore,
     system_mode: &'static AtomicSystemMode,
     rags: Sender<'static, ThreadModeRawMutex, Rag, CHANNEL_CAPACITY>,
 ) -> ! {
-    let my_mode = if leg == Leg::A {
+    let my_mode = if lane == Lane::A {
         SystemMode::PriorityA
     } else {
         SystemMode::PriorityB
@@ -145,11 +145,11 @@ async fn priority_mode_task(
         let _permit = semaphore.acquire(1).await.unwrap();
 
         // Attention Phase
-        rags.send(Rag::new(leg, true, true, false)).await;
+        rags.send(Rag::new(lane, true, true, false)).await;
         Timer::after_millis(1_500).await;
 
         // Go Phase
-        rags.send(Rag::new(leg, false, false, true)).await;
+        rags.send(Rag::new(lane, false, false, true)).await;
         Timer::after_millis(4_000).await;
 
         // crude...
@@ -158,11 +158,11 @@ async fn priority_mode_task(
         }
 
         // Yield Phase
-        rags.send(Rag::new(leg, false, true, false)).await;
+        rags.send(Rag::new(lane, false, true, false)).await;
         Timer::after_millis(3_000).await;
 
         // Clear Crossring Phase
-        rags.send(Rag::new(leg, true, false, false)).await;
+        rags.send(Rag::new(lane, true, false, false)).await;
         Timer::after_millis(2_000).await;
 
         // _permit is released here...
@@ -258,21 +258,21 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
     spawner
         .spawn(normal_mode_task(
-            Leg::A,
+            Lane::A,
             &NORMAL_MODE_SEMAPHORE,
             RAGS.sender(),
         ))
         .unwrap();
     spawner
         .spawn(normal_mode_task(
-            Leg::B,
+            Lane::B,
             &NORMAL_MODE_SEMAPHORE,
             RAGS.sender(),
         ))
         .unwrap();
     spawner
         .spawn(priority_mode_task(
-            Leg::A,
+            Lane::A,
             &PRIORITY_A_SEMAPHORE,
             &SYSTEM_MODE,
             RAGS.sender(),
@@ -280,7 +280,7 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
     spawner
         .spawn(priority_mode_task(
-            Leg::B,
+            Lane::B,
             &PRIORITY_B_SEMAPHORE,
             &SYSTEM_MODE,
             RAGS.sender(),
