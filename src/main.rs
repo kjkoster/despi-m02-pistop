@@ -6,7 +6,8 @@
 
 mod io;
 use io::{
-    Lane, SystemMode, initialise_io, light_led4, light_traffic_lights, print, read_system_mode,
+    Lane, SystemMode, initialise_io, light_lockout, light_power, light_traffic_lights, print,
+    read_system_mode, toggle_lockout,
 };
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -251,6 +252,15 @@ async fn system_mode_task(
         // Some tasks have a simple loop. They just need a semaphore that they
         // release every cycle. Some tasks have a second, inner loop. They need
         // a second trigger to be able to safely break out of the inner loop.
+        //
+        // It might be tempting to just make the system status into a global
+        // variable and use that to break out of the inner loops. Unfortunately,
+        // that may leave the semaphore handler task in a deadlocked state. The
+        // steps to reach that deadlock are that the user switches to a new
+        // state, then switches back while the permits are being collected. The
+        // tasks then see that the system mode is as they expected and will not
+        // release their permits, while the semaphore handler won't accept new
+        // states until all semaphores have been collected.
 
         print("sem hand: locking out.\r\n").await;
         lockout.store(true, Ordering::Relaxed);
@@ -276,9 +286,21 @@ fn ensure_released(permit: &mut bool, semaphore: &'static CrossingSemaphore) {
     }
 }
 
+#[embassy_executor::task]
+async fn lockout_led_task(lockout: &'static AtomicBool) -> ! {
+    loop {
+        Timer::after_millis(50).await;
+
+        match lockout.load(Ordering::Relaxed) {
+            false => light_lockout(false).await,
+            true => toggle_lockout().await,
+        }
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {
-    initialise_io(true, false, false, true).await;
+    initialise_io(true, false, false, false, false).await;
     print("I/O initialised.\r\n").await;
 
     const START_MODE: SystemMode = SystemMode::Normal;
@@ -318,29 +340,15 @@ async fn main(spawner: Spawner) -> ! {
     spawner
         .spawn(system_mode_reader_task(START_MODE, &SYSTEM_MODE_SIGNAL))
         .unwrap();
+    spawner.spawn(lockout_led_task(&LOCKOUT)).unwrap();
 
-    // Help count seconds by flashing the on-board LED roughly once every
-    // second. In normal mode we just flash, in maintenance mode we blink on and
-    // off.
+    // Help count seconds by flashing the power and on-board leds roughly once
+    // every second. This demonstrates liveness of the system as a whole.
     loop {
-        light_led4(true).await;
-        match LOCKOUT.load(Ordering::Relaxed) {
-            true => {
-                Timer::after_millis(50).await;
-            }
-            false => {
-                Timer::after_millis(15).await;
-            }
-        }
+        light_power(true).await;
+        Timer::after_millis(15).await;
 
-        light_led4(false).await;
-        match LOCKOUT.load(Ordering::Relaxed) {
-            true => {
-                Timer::after_millis(50).await;
-            }
-            false => {
-                Timer::after_millis(985).await;
-            }
-        }
+        light_power(false).await;
+        Timer::after_millis(985).await;
     }
 }
