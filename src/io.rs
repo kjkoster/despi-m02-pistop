@@ -39,6 +39,8 @@ pub enum Lane {
 
 static OUTPUTS_A: Mutex<ThreadModeRawMutex, Option<[Output; 3]>> = Mutex::new(None);
 static OUTPUTS_B: Mutex<ThreadModeRawMutex, Option<[Output; 3]>> = Mutex::new(None);
+static OUTPUTS_C: Mutex<ThreadModeRawMutex, Option<[Output; 2]>> = Mutex::new(None);
+static OUTPUTS_D: Mutex<ThreadModeRawMutex, Option<[Output; 2]>> = Mutex::new(None);
 static POWER: Mutex<ThreadModeRawMutex, Option<Output>> = Mutex::new(None);
 static LED4: Mutex<ThreadModeRawMutex, Option<Output>> = Mutex::new(None);
 static LOCKOUT: Mutex<ThreadModeRawMutex, Option<Output>> = Mutex::new(None);
@@ -63,7 +65,6 @@ pub async fn initialise_io(red: bool, amber: bool, green: bool, power: bool, loc
         Output::new(peripherals.PB7.degrade(), Level::Low, Speed::Low),
     ];
     OUTPUTS_A.lock().await.replace(outputs_a);
-    light_traffic_lights(Lane::A, red, amber, green).await;
 
     let outputs_b: [Output; 3] = [
         // crossing ribbon / blue
@@ -74,7 +75,22 @@ pub async fn initialise_io(red: bool, amber: bool, green: bool, power: bool, loc
         Output::new(peripherals.PE0.degrade(), Level::Low, Speed::Low),
     ];
     OUTPUTS_B.lock().await.replace(outputs_b);
-    light_traffic_lights(Lane::B, red, amber, green).await;
+
+    let outputs_c: [Output; 2] = [
+        // crossing ribbon / amber
+        Output::new(peripherals.PB5.degrade(), Level::Low, Speed::Low),
+        // crossing ribbon / red
+        Output::new(peripherals.PD6.degrade(), Level::Low, Speed::Low),
+    ];
+    OUTPUTS_C.lock().await.replace(outputs_c);
+
+    let outputs_d: [Output; 2] = [
+        // crossing ribbon / brown
+        Output::new(peripherals.PD5.degrade(), Level::Low, Speed::Low),
+        // crossing ribbon / black
+        Output::new(peripherals.PD7.degrade(), Level::Low, Speed::Low),
+    ];
+    OUTPUTS_D.lock().await.replace(outputs_d);
 
     // status led ribbon / green
     let power_led: Output = Output::new(peripherals.PE3.degrade(), Level::Low, Speed::Low);
@@ -82,12 +98,10 @@ pub async fn initialise_io(red: bool, amber: bool, green: bool, power: bool, loc
     // PCB mounted / LED4
     let onboard_led4 = Output::new(peripherals.PE12, Level::Low, Speed::Low);
     LED4.lock().await.replace(onboard_led4);
-    light_power(power).await;
 
     // status led ribbon / yellow
     let lockout_led: Output = Output::new(peripherals.PE5.degrade(), Level::Low, Speed::Low);
     LOCKOUT.lock().await.replace(lockout_led);
-    light_lockout(lockout).await;
 
     let system_mode_inputs: [Input; 3] = [
         // status rotary ribbon / blue
@@ -113,9 +127,16 @@ pub async fn initialise_io(red: bool, amber: bool, green: bool, power: bool, loc
     )
     .unwrap();
     UART.lock().await.replace(uart);
+
+    light_traffic_lights(Lane::A, red, amber, green).await;
+    light_traffic_lights(Lane::B, red, amber, green).await;
+    light_pedestrian_lights(Lane::A, red, green).await;
+    light_pedestrian_lights(Lane::B, red, green).await;
+    light_power(power).await;
+    light_lockout(lockout).await;
 }
 
-/// Light lamps on both traffic lights in the specified lane. The leds are wired
+/// Light lamps on the traffic lights in the specified lane. The leds are wired
 /// to be active-high, but this function handles that. Pass in `true` for a
 /// colour to turn it on and `false` to turn it off.
 pub async fn light_traffic_lights(lane: Lane, red: bool, amber: bool, green: bool) {
@@ -129,6 +150,25 @@ pub async fn light_traffic_lights(lane: Lane, red: bool, amber: bool, green: boo
     outputs[0].set_level(if red { Level::High } else { Level::Low });
     outputs[1].set_level(if amber { Level::High } else { Level::Low });
     outputs[2].set_level(if green { Level::High } else { Level::Low });
+}
+/// Light lamps on the predestrian lights in the specified lane. The leds are
+/// wired to be active-high, but this function handles that. Pass in `true` for
+/// a colour to turn it on and `false` to turn it off.
+///
+/// Somewhat counter-intuitively, the board is wired so that lane A is being
+/// controlled by `OUTPUTS_A` and `OUTPUTS_D`. Lane B is controlled by
+/// `OUTPUTS_B` and `OUTPUTS_C`. This function maps the pedestrian light outputs
+/// to the right lane.
+pub async fn light_pedestrian_lights(lane: Lane, red: bool, green: bool) {
+    let mut outputs_guard: MutexGuard<'_, ThreadModeRawMutex, Option<[Output; 2]>> = match lane {
+        Lane::A => OUTPUTS_D.lock(),
+        Lane::B => OUTPUTS_C.lock(),
+    }
+    .await;
+    let outputs: &mut [Output; 2] = outputs_guard.as_mut().expect(IO_INIT_PANIC);
+
+    outputs[0].set_level(if red { Level::High } else { Level::Low });
+    outputs[1].set_level(if green { Level::High } else { Level::Low });
 }
 
 async fn light_led(led: &Mutex<ThreadModeRawMutex, Option<Output<'_>>>, on: bool) {

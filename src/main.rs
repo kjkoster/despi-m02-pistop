@@ -6,8 +6,8 @@
 
 mod io;
 use io::{
-    Lane, SystemMode, initialise_io, light_lockout, light_power, light_traffic_lights, print,
-    read_system_mode, toggle_lockout,
+    Lane, SystemMode, initialise_io, light_lockout, light_pedestrian_lights, light_power,
+    light_traffic_lights, print, read_system_mode, toggle_lockout,
 };
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +46,7 @@ async fn normal_mode_task(lane: Lane, semaphore: &'static CrossingSemaphore) -> 
 
         // Attention Phase
         light_traffic_lights(lane, true, true, false).await;
+        light_pedestrian_lights(lane, false, true).await;
         Timer::after_millis(1_500).await;
 
         // Go Phase
@@ -54,10 +55,12 @@ async fn normal_mode_task(lane: Lane, semaphore: &'static CrossingSemaphore) -> 
 
         // Yield Phase
         light_traffic_lights(lane, false, true, false).await;
+        light_pedestrian_lights(lane, true, false).await;
         Timer::after_millis(3_000).await;
 
         // Clear Crossring Phase
         light_traffic_lights(lane, true, false, false).await;
+        light_pedestrian_lights(lane, true, false).await;
         Timer::after_millis(2_000).await;
 
         // _permit is released here...
@@ -70,6 +73,9 @@ async fn flash_mode_task(semaphore: &'static CrossingSemaphore, lockout: &'stati
         // we use this scope to safely hold the permit from the semaphore
         // for normal run mode.
         let _permit = semaphore.acquire(1).await.unwrap();
+
+        light_pedestrian_lights(Lane::A, false, false).await;
+        light_pedestrian_lights(Lane::B, false, false).await;
 
         while !lockout.load(Ordering::Relaxed) {
             // Flash On Phase
@@ -86,11 +92,15 @@ async fn flash_mode_task(semaphore: &'static CrossingSemaphore, lockout: &'stati
         // Yield Phase
         light_traffic_lights(Lane::A, false, true, false).await;
         light_traffic_lights(Lane::B, false, true, false).await;
+        light_pedestrian_lights(Lane::A, true, false).await;
+        light_pedestrian_lights(Lane::B, true, false).await;
         Timer::after_millis(3_000).await;
 
         // Clear Crossring Phase
         light_traffic_lights(Lane::A, true, false, false).await;
         light_traffic_lights(Lane::B, true, false, false).await;
+        light_pedestrian_lights(Lane::A, true, false).await;
+        light_pedestrian_lights(Lane::B, true, false).await;
         Timer::after_millis(2_000).await;
 
         // _permit is released here...
@@ -107,6 +117,9 @@ async fn priority_mode_task(
         // we use this scope to safely hold the permit from the semaphore
         // for normal run mode.
         let _permit = semaphore.acquire(1).await.unwrap();
+
+        // no pedestrians while emergency services pass
+        light_pedestrian_lights(lane, true, false).await;
 
         // Attention Phase
         light_traffic_lights(lane, true, true, false).await;
