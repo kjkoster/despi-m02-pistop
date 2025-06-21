@@ -293,10 +293,11 @@ async fn ensure_aquired(permit: &mut bool, semaphore: &'static CrossingSemaphore
     }
 }
 fn ensure_released(permit: &mut bool, semaphore: &'static CrossingSemaphore) {
-    if *permit {
-        semaphore.release(1);
-        *permit = false;
+    if !*permit {
+        panic!("double free of permit");
     }
+    semaphore.release(1);
+    *permit = false;
 }
 
 #[embassy_executor::task]
