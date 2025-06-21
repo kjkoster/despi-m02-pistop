@@ -55,34 +55,46 @@ pub async fn initialise_io(red: bool, amber: bool, green: bool, power: bool, loc
     let peripherals = embassy_stm32::init(Default::default());
 
     let outputs_a: [Output; 3] = [
+        // crossing ribbon / white
         Output::new(peripherals.PE1.degrade(), Level::Low, Speed::Low),
+        // crossing ribbon / grey
         Output::new(peripherals.PB9.degrade(), Level::Low, Speed::Low),
+        // crossing ribbon / purple
         Output::new(peripherals.PB7.degrade(), Level::Low, Speed::Low),
     ];
     OUTPUTS_A.lock().await.replace(outputs_a);
     light_traffic_lights(Lane::A, red, amber, green).await;
 
     let outputs_b: [Output; 3] = [
+        // crossing ribbon / blue
         Output::new(peripherals.PB6.degrade(), Level::Low, Speed::Low),
+        // crossing ribbon / green
         Output::new(peripherals.PB8.degrade(), Level::Low, Speed::Low),
+        // crossing ribbon / yellow
         Output::new(peripherals.PE0.degrade(), Level::Low, Speed::Low),
     ];
     OUTPUTS_B.lock().await.replace(outputs_b);
     light_traffic_lights(Lane::B, red, amber, green).await;
 
+    // status led ribbon / green
     let power_led: Output = Output::new(peripherals.PE3.degrade(), Level::Low, Speed::Low);
     POWER.lock().await.replace(power_led);
+    // PCB mounted / LED4
     let onboard_led4 = Output::new(peripherals.PE12, Level::Low, Speed::Low);
     LED4.lock().await.replace(onboard_led4);
     light_power(power).await;
 
+    // status led ribbon / yellow
     let lockout_led: Output = Output::new(peripherals.PE5.degrade(), Level::Low, Speed::Low);
     LOCKOUT.lock().await.replace(lockout_led);
     light_lockout(lockout).await;
 
     let system_mode_inputs: [Input; 3] = [
+        // status rotary ribbon / blue
         Input::new(peripherals.PB14.degrade(), Pull::Up),
+        // status rotary ribbon / green
         Input::new(peripherals.PB12.degrade(), Pull::Up),
+        // status rotary ribbon / yellow
         Input::new(peripherals.PB10.degrade(), Pull::Up),
     ];
     MODE_INPUTS.lock().await.replace(system_mode_inputs);
