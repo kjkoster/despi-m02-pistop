@@ -32,23 +32,26 @@ use enum_ordinalize::Ordinalize;
 #[derive(Ordinalize, Clone, Copy)]
 #[repr(usize)]
 pub enum Pins {
-    // lane A
+    // Left-right lane, lights A, pedestrian lights D, promise F and beeper.
     ARed,
     AAmber,
     AGreen,
-    DPedestrianRed,
-    DPedestrianGreen,
-    FPromise,
-    GBeeper,
+    APedestrianRed,
+    APedestrianGreen,
+    APromise,
+    ABeeper,
 
-    // lane b
+    // Up-down lane: lights B, pedestrian lists C and promise E.
     BRed,
     BAmber,
     BGreen,
-    CPedestrianRed,
-    CPedestrianGreen,
-    EPromise,
-    HBeeper, // not actually connected...
+    BPedestrianRed,
+    BPedestrianGreen,
+    BPromise,
+    // The PCB does not have a beeper for the up-down lane. We have a mock value
+    // here to keep the code orthogonal. It is simply mapped to an unused output
+    // pin.
+    BBeeper,
 
     // common
     OnBoardPower,

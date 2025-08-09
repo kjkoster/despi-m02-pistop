@@ -526,17 +526,17 @@ async fn main(spawner: Spawner) -> ! {
     static TRAFFIC_LIGHTS_B: TrafficLights =
         TrafficLights::new(&LIGHTS, Pins::BRed, Pins::BAmber, Pins::BGreen);
 
-    static PEDESTRIAN_LIGHTS_D: PedestrianLights = PedestrianLights::new(
+    static PEDESTRIAN_LIGHTS_A: PedestrianLights = PedestrianLights::new(
         &LIGHTS,
-        Pins::DPedestrianRed,
-        Pins::DPedestrianGreen,
-        Pins::GBeeper,
+        Pins::APedestrianRed,
+        Pins::APedestrianGreen,
+        Pins::ABeeper,
     );
-    static PEDESTRIAN_LIGHTS_C: PedestrianLights = PedestrianLights::new(
+    static PEDESTRIAN_LIGHTS_B: PedestrianLights = PedestrianLights::new(
         &LIGHTS,
-        Pins::CPedestrianRed,
-        Pins::CPedestrianGreen,
-        Pins::HBeeper,
+        Pins::BPedestrianRed,
+        Pins::BPedestrianGreen,
+        Pins::BBeeper,
     );
 
     const START_MODE: SystemMode = SystemMode::Flash;
@@ -578,7 +578,7 @@ async fn main(spawner: Spawner) -> ! {
     print(&SERIAL, "started 1...\n\r").await;
 
     let mut outputs: [Output<'_>; Pins::VARIANT_COUNT] = [
-        // Lane A
+        // Left-right lane outputs.
         //
         // Pins::ARed - crossing ribbon / white
         Output::new(peripherals.PE1.degrade(), Level::Low, Speed::Low),
@@ -586,18 +586,17 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(peripherals.PB9.degrade(), Level::Low, Speed::Low),
         // Pins::AGreen - crossing ribbon / purple
         Output::new(peripherals.PB7.degrade(), Level::Low, Speed::Low),
-        // Pins::DPedestrianRed - crossing ribbon / brown
+        // Pins::APedestrianRed - crossing ribbon / brown
         Output::new(peripherals.PD5.degrade(), Level::Low, Speed::Low),
-        // Pins::DPedestrianGreen - crossing ribbon / black
+        // Pins::APedestrianGreen - crossing ribbon / black
         Output::new(peripherals.PD7.degrade(), Level::Low, Speed::Low),
         // XXX ? ?
-        // Pins::FPromise - status led ribbon / yellow
+        // Pins::APromise - status led ribbon / yellow
         Output::new(peripherals.PE4.degrade(), Level::Low, Speed::Low),
-        // XXX ? ?
-        // Pins::GBeeper - beeper, XXX??
+        // Pins::ABeeper - crossing ribbon / purple
         Output::new(peripherals.PD2.degrade(), Level::Low, Speed::Low),
         //
-        // Lane B
+        // Up-down lane outputs.
         //
         // Pins::BRed - crossing ribbon / blue
         Output::new(peripherals.PB6.degrade(), Level::Low, Speed::Low),
@@ -605,22 +604,23 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(peripherals.PB8.degrade(), Level::Low, Speed::Low),
         // Pins::BGreen - crossing ribbon / yellow
         Output::new(peripherals.PE0.degrade(), Level::Low, Speed::Low),
-        // Pins::CPedestrianRed - crossing ribbon / amber
+        // Pins::BPedestrianRed - crossing ribbon / amber
         Output::new(peripherals.PB5.degrade(), Level::Low, Speed::Low),
-        // Pins::CPedestrianGreen - crossing ribbon / red
+        // Pins::BPedestrianGreen - crossing ribbon / red
         Output::new(peripherals.PD6.degrade(), Level::Low, Speed::Low),
         // XXX ? ?
-        // Pins::EPromise - status led ribbon / yellow
+        // Pins::BPromise - status led ribbon / yellow
         Output::new(peripherals.PE5.degrade(), Level::Low, Speed::Low),
-        // XXX ? ?
-        // Pins::GBeeper - crossing ribbon / purple
-        Output::new(peripherals.PD0.degrade(), Level::Low, Speed::Low), // XXX shut the beeper up...
+        // Pins::BBeeper - not connected
+        Output::new(peripherals.PC1.degrade(), Level::Low, Speed::Low),
         //
         // Common
         //
-        // Pins::Power - PCB mounted / LED4 As an aside: Leds `LED1` (power),
+        // As an aside: While `LED4` is controllable, Leds `LED1` (power),
         // `LED2` (serial RX) and `LED3` (serial TX) cannot be controlled from
         // code. They have been hardwired on the PCB.
+        //
+        // Pins::Power - PCB mounted / LED4
         Output::new(peripherals.PE12, Level::Low, Speed::Low),
         // XXX ? ?
         // Pins::Power - status led ribbon / green
@@ -636,15 +636,15 @@ async fn main(spawner: Spawner) -> ! {
 
         lights.set_on_off3(Pins::ARed, true, Pins::AAmber, false, Pins::AGreen, false);
         lights.set_on_off3(Pins::BRed, true, Pins::BAmber, false, Pins::BGreen, false);
-        lights.set_on_off2(Pins::CPedestrianRed, true, Pins::CPedestrianGreen, false);
-        lights.set_on_off2(Pins::DPedestrianRed, true, Pins::DPedestrianGreen, false);
+        lights.set_on_off2(Pins::APedestrianRed, true, Pins::APedestrianGreen, false);
+        lights.set_on_off2(Pins::BPedestrianRed, true, Pins::BPedestrianGreen, false);
 
         // Make the power leds blink with short bips
         lights.set_pin(Pins::OnBoardPower, true, false, false, true);
         lights.set_pin(Pins::Power, true, false, false, true);
     }
 
-    static MODE_INPUTS: Mutex<ThreadModeRawMutex, Option<[Input<'static>; 3]>> =
+    static SYSTEM_MODE_INPUTS: Mutex<ThreadModeRawMutex, Option<[Input<'static>; 3]>> =
         Mutex::new(Option::None);
     let system_mode_inputs: [Input; 3] = [
         // status rotary ribbon / blue
@@ -656,69 +656,55 @@ async fn main(spawner: Spawner) -> ! {
     ];
     {
         // scope for the mutex guard...
-        MODE_INPUTS.lock().await.replace(system_mode_inputs);
+        SYSTEM_MODE_INPUTS.lock().await.replace(system_mode_inputs);
     }
 
-    spawner
-        .spawn(normal_mode_task(
-            &NORMAL_MODE_SEMAPHORE,
-            &TRAFFIC_LIGHTS_A,
-            &PEDESTRIAN_LIGHTS_D,
-        ))
-        .unwrap();
-    spawner
-        .spawn(normal_mode_task(
-            &NORMAL_MODE_SEMAPHORE,
-            &TRAFFIC_LIGHTS_B,
-            &PEDESTRIAN_LIGHTS_C,
-        ))
-        .unwrap();
-    spawner
-        .spawn(flash_mode_task(
-            &FLASH_MODE_SEMAPHORE,
-            &TRAFFIC_LIGHTS_A,
-            &TRAFFIC_LIGHTS_B,
-            &PEDESTRIAN_LIGHTS_C,
-            &PEDESTRIAN_LIGHTS_D,
-            &LOCKOUT,
-        ))
-        .unwrap();
-    spawner
-        .spawn(priority_mode_task(
-            &PRIORITY_A_SEMAPHORE,
-            &TRAFFIC_LIGHTS_A,
-            &PEDESTRIAN_LIGHTS_D,
-            &LOCKOUT,
-        ))
-        .unwrap();
-    spawner
-        .spawn(priority_mode_task(
-            &PRIORITY_B_SEMAPHORE,
-            &TRAFFIC_LIGHTS_B,
-            &PEDESTRIAN_LIGHTS_C,
-            &LOCKOUT,
-        ))
-        .unwrap();
-    spawner
-        .spawn(system_mode_task(
-            &SERIAL,
-            START_MODE,
-            &SYSTEM_MODE_SIGNAL,
-            &NORMAL_MODE_SEMAPHORE,
-            &FLASH_MODE_SEMAPHORE,
-            &PRIORITY_A_SEMAPHORE,
-            &PRIORITY_B_SEMAPHORE,
-            &LOCKOUT,
-        ))
-        .unwrap();
-    spawner
-        .spawn(system_mode_reader_task(
-            &SERIAL,
-            &MODE_INPUTS,
-            START_MODE,
-            &SYSTEM_MODE_SIGNAL,
-        ))
-        .unwrap();
+    spawner.must_spawn(normal_mode_task(
+        &NORMAL_MODE_SEMAPHORE,
+        &TRAFFIC_LIGHTS_A,
+        &PEDESTRIAN_LIGHTS_A,
+    ));
+    spawner.must_spawn(normal_mode_task(
+        &NORMAL_MODE_SEMAPHORE,
+        &TRAFFIC_LIGHTS_B,
+        &PEDESTRIAN_LIGHTS_B,
+    ));
+    spawner.must_spawn(flash_mode_task(
+        &FLASH_MODE_SEMAPHORE,
+        &TRAFFIC_LIGHTS_A,
+        &TRAFFIC_LIGHTS_B,
+        &PEDESTRIAN_LIGHTS_A,
+        &PEDESTRIAN_LIGHTS_B,
+        &LOCKOUT,
+    ));
+    spawner.must_spawn(priority_mode_task(
+        &PRIORITY_A_SEMAPHORE,
+        &TRAFFIC_LIGHTS_A,
+        &PEDESTRIAN_LIGHTS_A,
+        &LOCKOUT,
+    ));
+    spawner.must_spawn(priority_mode_task(
+        &PRIORITY_B_SEMAPHORE,
+        &TRAFFIC_LIGHTS_B,
+        &PEDESTRIAN_LIGHTS_B,
+        &LOCKOUT,
+    ));
+    spawner.must_spawn(system_mode_task(
+        &SERIAL,
+        START_MODE,
+        &SYSTEM_MODE_SIGNAL,
+        &NORMAL_MODE_SEMAPHORE,
+        &FLASH_MODE_SEMAPHORE,
+        &PRIORITY_A_SEMAPHORE,
+        &PRIORITY_B_SEMAPHORE,
+        &LOCKOUT,
+    ));
+    spawner.must_spawn(system_mode_reader_task(
+        &SERIAL,
+        &SYSTEM_MODE_INPUTS,
+        START_MODE,
+        &SYSTEM_MODE_SIGNAL,
+    ));
 
     loop {
         let output_values: [bool; Pins::VARIANT_COUNT] = {
