@@ -1,5 +1,5 @@
 [package]
-name = "despi-m02-rust"
+name = "despi-m02-pistop"
 version = "0.1.0"
 edition = "2024"
 
@@ -21,6 +21,7 @@ cortex-m-rt = "0.7.5"
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
 embassy-sync = "0.7.0"
 embassy-futures = "0.1.1"
+enum-ordinalize = "4.3.0"
 
 [profile.release]
 lto = true        # https://doc.rust-lang.org/cargo/reference/profiles.html#lto
