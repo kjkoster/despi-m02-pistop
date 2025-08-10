@@ -94,6 +94,10 @@ struct PedestrianLights {
     red: Pins,
     green: Pins,
     beeper: Pins,
+    promise: Pins,
+    old_promise: AtomicBool,
+    active: AtomicBool,
+    promise_made: AtomicBool,
 }
 
 impl PedestrianLights {
@@ -102,12 +106,17 @@ impl PedestrianLights {
         red: Pins,
         green: Pins,
         beeper: Pins,
+        promise: Pins,
     ) -> Self {
         PedestrianLights {
             lights: lights,
             red: red,
             green: green,
             beeper: beeper,
+            promise: promise,
+            old_promise: AtomicBool::new(false),
+            active: AtomicBool::new(false),
+            promise_made: AtomicBool::new(false),
         }
     }
 
@@ -115,30 +124,54 @@ impl PedestrianLights {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
             self.lights.lock().await;
         lights.set_on_off2(self.red, true, self.green, false);
-        lights.set_pin(self.beeper, true, false, false, true);
+
+        self.active.store(true, Ordering::Relaxed);
     }
     async fn go_go(&self) {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
             self.lights.lock().await;
-        lights.set_on_off2(self.red, false, self.green, true);
-        lights.set_pin(self.beeper, true, false, true, false);
+
+        let active_promise =
+            self.active.load(Ordering::Relaxed) && self.promise_made.load(Ordering::Relaxed);
+
+        lights.set_on_off2(self.red, false, self.green, active_promise);
+        lights.set_pin(self.beeper, active_promise, false, true, false);
+
+        self.old_promise.store(active_promise, Ordering::Relaxed);
     }
     async fn go_flash(&self) {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
             self.lights.lock().await;
         lights.set_on_off3(self.red, false, self.green, false, self.beeper, false);
+
+        self.old_promise.store(false, Ordering::Relaxed);
+        self.active.store(false, Ordering::Relaxed);
+        self.promise_made.store(false, Ordering::Relaxed);
+        lights.set_on_off(self.promise, false);
     }
     async fn go_yield_flash(&self) {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
             self.lights.lock().await;
         lights.set_on_off3(self.red, false, self.green, false, self.beeper, false);
+
+        self.old_promise.store(false, Ordering::Relaxed);
+        self.active.store(false, Ordering::Relaxed);
+        self.promise_made.store(false, Ordering::Relaxed);
+        lights.set_on_off(self.promise, false);
     }
     async fn go_yield(&self) {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
             self.lights.lock().await;
         lights.set_on_off(self.red, false);
-        lights.set_pin(self.green, true, true, false, false);
-        lights.set_pin(self.beeper, true, true, true, false);
+
+        let active_old_promise =
+            self.active.load(Ordering::Relaxed) && self.old_promise.load(Ordering::Relaxed);
+        lights.set_pin(self.beeper, active_old_promise, true, true, false);
+        lights.set_pin(self.green, active_old_promise, true, false, false);
+
+        self.old_promise.store(false, Ordering::Relaxed);
+        self.promise_made.store(false, Ordering::Relaxed);
+        lights.set_on_off(self.promise, false);
     }
     async fn go_clear(&self) {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
@@ -146,12 +179,28 @@ impl PedestrianLights {
         lights.set_on_off2(self.red, true, self.green, false);
         lights.set_on_off(self.beeper, false);
     }
+
+    async fn make_promise(&self) {
+        let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
+            self.lights.lock().await;
+
+        self.promise_made.store(true, Ordering::Relaxed);
+        lights.set_on_off(self.promise, true);
+        lights.set_pin(
+            self.beeper,
+            self.active.load(Ordering::Relaxed),
+            false,
+            false,
+            true,
+        );
+    }
 }
 
 const NUM_NORMAL_MODE_TASKS: usize = 2;
 const NUM_FLASH_MODE_TASKS: usize = 1;
 const NUM_PRIORITY_TASKS: usize = 2;
 const NUM_FLASH_BUTTON_TASKS: usize = 1;
+const NUM_PROMISE_INPUT_TASKS: usize = 2;
 // Strictly speaking, the queue in this type is too large for the actual number
 // of tasks, but I'd have to calculate the max of the two num_somethings. Maybe
 // I'll get round to that some other time,
@@ -493,6 +542,24 @@ fn ensure_released(permit: &mut bool, semaphore: &'static CrossingSemaphore) {
     *permit = false;
 }
 
+// All we have to do here is just make the state of the promise available in the
+// code. The normal mode task will pick this information up, mask off unwanted
+// button presses and act on the request.
+#[embassy_executor::task(pool_size = NUM_PROMISE_INPUT_TASKS)]
+async fn promise_input_task(
+    input_option: &'static Mutex<ThreadModeRawMutex, Option<Input<'static>>>,
+    pedestrian_lights: &'static PedestrianLights,
+) -> ! {
+    let input: Input = input_option.lock().await.take().expect(IO_INIT_ERROR);
+    loop {
+        Timer::after_millis(10).await;
+
+        if input.is_low() {
+            pedestrian_lights.make_promise().await;
+        }
+    }
+}
+
 pub async fn print(
     uart: &'static Mutex<ThreadModeRawMutex, Option<Uart<'static, Async>>>,
     message: &str,
@@ -515,7 +582,11 @@ async fn main(spawner: Spawner) -> ! {
     // The power led is active-high and `LED4` is active-low.
     static ACTIVE_LOWS: [bool; Pins::VARIANT_COUNT] = {
         let mut active_lows = [false; Pins::VARIANT_COUNT];
+        active_lows[ 5 /* Pins::APromise.ordinal() */] = true;
+        active_lows[12 /* Pins::BPromise.ordinal() */] = true;
         active_lows[14 /* Pins::OnBoardPower.ordinal() */] = true;
+        active_lows[15 /* Pins::Power.ordinal() */] = true;
+        active_lows[16 /* Pins::SwitchingMode.ordinal() */] = true;
         active_lows
     };
     static LIGHTS: Mutex<ThreadModeRawMutex, TimedOutputMasker> =
@@ -531,12 +602,14 @@ async fn main(spawner: Spawner) -> ! {
         Pins::APedestrianRed,
         Pins::APedestrianGreen,
         Pins::ABeeper,
+        Pins::APromise,
     );
     static PEDESTRIAN_LIGHTS_B: PedestrianLights = PedestrianLights::new(
         &LIGHTS,
         Pins::BPedestrianRed,
         Pins::BPedestrianGreen,
         Pins::BBeeper,
+        Pins::BPromise,
     );
 
     const START_MODE: SystemMode = SystemMode::Flash;
@@ -590,9 +663,8 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(peripherals.PD5.degrade(), Level::Low, Speed::Low),
         // Pins::APedestrianGreen - crossing ribbon / black
         Output::new(peripherals.PD7.degrade(), Level::Low, Speed::Low),
-        // XXX ? ?
-        // Pins::APromise - status led ribbon / yellow
-        Output::new(peripherals.PE4.degrade(), Level::Low, Speed::Low),
+        // Pins::APromise - status leds ribbon / orange
+        Output::new(peripherals.PE5.degrade(), Level::Low, Speed::Low),
         // Pins::ABeeper - crossing ribbon / purple
         Output::new(peripherals.PD2.degrade(), Level::Low, Speed::Low),
         //
@@ -608,9 +680,8 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(peripherals.PB5.degrade(), Level::Low, Speed::Low),
         // Pins::BPedestrianGreen - crossing ribbon / red
         Output::new(peripherals.PD6.degrade(), Level::Low, Speed::Low),
-        // XXX ? ?
-        // Pins::BPromise - status led ribbon / yellow
-        Output::new(peripherals.PE5.degrade(), Level::Low, Speed::Low),
+        // Pins::BPromise - status leds ribbon / red
+        Output::new(peripherals.PE4.degrade(), Level::Low, Speed::Low),
         // Pins::BBeeper - not connected
         Output::new(peripherals.PC1.degrade(), Level::Low, Speed::Low),
         //
@@ -622,12 +693,10 @@ async fn main(spawner: Spawner) -> ! {
         //
         // Pins::Power - PCB mounted / LED4
         Output::new(peripherals.PE12, Level::Low, Speed::Low),
-        // XXX ? ?
-        // Pins::Power - status led ribbon / green
-        Output::new(peripherals.PA0.degrade(), Level::Low, Speed::Low),
-        // XXX ? ?
-        // Pins::SwitchingMode - status led ribbon / yellow
-        Output::new(peripherals.PE7.degrade(), Level::Low, Speed::Low),
+        // Pins::Power - status leds ribbon / white
+        Output::new(peripherals.PE2.degrade(), Level::Low, Speed::Low),
+        // Pins::SwitchingMode - status leds ribbon / purple
+        Output::new(peripherals.PE3.degrade(), Level::Low, Speed::Low),
     ];
 
     {
@@ -657,6 +726,18 @@ async fn main(spawner: Spawner) -> ! {
     {
         // scope for the mutex guard...
         SYSTEM_MODE_INPUTS.lock().await.replace(system_mode_inputs);
+    }
+
+    static PROMISE_INPUT_A: Mutex<ThreadModeRawMutex, Option<Input<'static>>> = Mutex::new(None);
+    static PROMISE_INPUT_B: Mutex<ThreadModeRawMutex, Option<Input<'static>>> = Mutex::new(None);
+    // crossing ribbon / gray
+    let promise_input_a: Input = Input::new(peripherals.PD3.degrade(), Pull::Up);
+    // crossing ribbon / white
+    let promise_input_b: Input = Input::new(peripherals.PD4.degrade(), Pull::Up);
+    {
+        // scope for the mutex guard...
+        PROMISE_INPUT_A.lock().await.replace(promise_input_a);
+        PROMISE_INPUT_B.lock().await.replace(promise_input_b);
     }
 
     spawner.must_spawn(normal_mode_task(
@@ -705,6 +786,8 @@ async fn main(spawner: Spawner) -> ! {
         START_MODE,
         &SYSTEM_MODE_SIGNAL,
     ));
+    spawner.must_spawn(promise_input_task(&PROMISE_INPUT_A, &PEDESTRIAN_LIGHTS_A));
+    spawner.must_spawn(promise_input_task(&PROMISE_INPUT_B, &PEDESTRIAN_LIGHTS_B));
 
     loop {
         let output_values: [bool; Pins::VARIANT_COUNT] = {
