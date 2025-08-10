@@ -196,17 +196,7 @@ impl PedestrianLights {
     }
 }
 
-const NUM_NORMAL_MODE_TASKS: usize = 2;
-const NUM_FLASH_MODE_TASKS: usize = 1;
-const NUM_PRIORITY_TASKS: usize = 2;
-const NUM_FLASH_BUTTON_TASKS: usize = 1;
-const NUM_PROMISE_INPUT_TASKS: usize = 2;
-// Strictly speaking, the queue in this type is too large for the actual number
-// of tasks, but I'd have to calculate the max of the two num_somethings. Maybe
-// I'll get round to that some other time,
-const NUM_TASKS: usize =
-    NUM_NORMAL_MODE_TASKS + NUM_FLASH_MODE_TASKS + NUM_PRIORITY_TASKS + NUM_FLASH_BUTTON_TASKS;
-type CrossingSemaphore = FairSemaphore<ThreadModeRawMutex, NUM_TASKS>;
+type CrossingSemaphore = FairSemaphore<ThreadModeRawMutex, 8>;
 
 // When the system starts, we don't know what happened before the shutdown. We
 // cannot trust the mode input, since it may be in debounce. Thus, we start in
@@ -214,7 +204,7 @@ type CrossingSemaphore = FairSemaphore<ThreadModeRawMutex, NUM_TASKS>;
 // entering. Maybe not efficient, but certainly safe.
 static LOCKOUT: AtomicBool = AtomicBool::new(true);
 
-#[embassy_executor::task(pool_size = NUM_NORMAL_MODE_TASKS)]
+#[embassy_executor::task(pool_size = 2)]
 async fn normal_mode_task(
     semaphore: &'static CrossingSemaphore,
     traffic_lights: &'static TrafficLights,
@@ -249,7 +239,7 @@ async fn normal_mode_task(
     }
 }
 
-#[embassy_executor::task(pool_size = NUM_FLASH_MODE_TASKS)]
+#[embassy_executor::task(pool_size = 1)]
 async fn flash_mode_task(
     semaphore: &'static CrossingSemaphore,
     traffic_lights_a: &'static TrafficLights,
@@ -291,7 +281,7 @@ async fn flash_mode_task(
     }
 }
 
-#[embassy_executor::task(pool_size = NUM_PRIORITY_TASKS)]
+#[embassy_executor::task(pool_size = 2)]
 async fn priority_mode_task(
     semaphore: &'static CrossingSemaphore,
     traffic_lights: &'static TrafficLights,
@@ -331,7 +321,7 @@ async fn priority_mode_task(
     }
 }
 
-#[embassy_executor::task(pool_size = NUM_FLASH_BUTTON_TASKS)]
+#[embassy_executor::task(pool_size = 1)]
 async fn system_mode_reader_task(
     serial: &'static Mutex<ThreadModeRawMutex, Option<Uart<'static, Async>>>,
     mode_inputs_option: &'static Mutex<ThreadModeRawMutex, Option<[Input<'static>; 3]>>,
@@ -443,7 +433,7 @@ fn read_system_mode(mode_inputs: &[Input; 3]) -> SystemMode {
     }
 }
 
-#[embassy_executor::task(pool_size = NUM_FLASH_BUTTON_TASKS)]
+#[embassy_executor::task(pool_size = 1)]
 async fn system_mode_task(
     serial: &'static Mutex<ThreadModeRawMutex, Option<Uart<'static, Async>>>,
     start_mode: SystemMode,
@@ -542,10 +532,7 @@ fn ensure_released(permit: &mut bool, semaphore: &'static CrossingSemaphore) {
     *permit = false;
 }
 
-// All we have to do here is just make the state of the promise available in the
-// code. The normal mode task will pick this information up, mask off unwanted
-// button presses and act on the request.
-#[embassy_executor::task(pool_size = NUM_PROMISE_INPUT_TASKS)]
+#[embassy_executor::task(pool_size = 2)]
 async fn promise_input_task(
     input_option: &'static Mutex<ThreadModeRawMutex, Option<Input<'static>>>,
     pedestrian_lights: &'static PedestrianLights,
@@ -553,7 +540,6 @@ async fn promise_input_task(
     let input: Input = input_option.lock().await.take().expect(IO_INIT_ERROR);
     loop {
         Timer::after_millis(10).await;
-
         if input.is_low() {
             pedestrian_lights.make_promise().await;
         }
@@ -639,16 +625,10 @@ async fn main(spawner: Spawner) -> ! {
     .unwrap();
     SERIAL.lock().await.replace(uart);
 
-    Timer::after_millis(500).await;
-    print(&SERIAL, "started 5...\n\r").await;
-    Timer::after_millis(500).await;
-    print(&SERIAL, "started 4...\n\r").await;
-    Timer::after_millis(500).await;
-    print(&SERIAL, "started 3...\n\r").await;
-    Timer::after_millis(500).await;
-    print(&SERIAL, "started 2...\n\r").await;
-    Timer::after_millis(500).await;
-    print(&SERIAL, "started 1...\n\r").await;
+    // The USB serial port takes about 3 seconds to connect when there is
+    // traffic. To troubleshoot startup problems it is a good idea to `print()`
+    // some messages at startup. We don't do that so that the control loop
+    // starts quickly, which makes the system feel fast and reliable.
 
     let mut outputs: [Output<'_>; Pins::VARIANT_COUNT] = [
         // Left-right lane outputs.
