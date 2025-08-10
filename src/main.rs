@@ -123,6 +123,7 @@ impl PedestrianLights {
     async fn go_attention(&self) {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
             self.lights.lock().await;
+
         lights.set_on_off2(self.red, true, self.green, false);
 
         self.active.store(true, Ordering::Relaxed);
@@ -130,18 +131,20 @@ impl PedestrianLights {
     async fn go_go(&self) {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
             self.lights.lock().await;
-
         let active_promise =
             self.active.load(Ordering::Relaxed) && self.promise_made.load(Ordering::Relaxed);
 
-        lights.set_on_off2(self.red, false, self.green, active_promise);
+        lights.set_on_off2(self.red, !active_promise, self.green, active_promise);
         lights.set_pin(self.beeper, active_promise, false, true, false);
 
         self.old_promise.store(active_promise, Ordering::Relaxed);
+        self.promise_made.store(false, Ordering::Relaxed);
+        lights.set_on_off(self.promise, false);
     }
     async fn go_flash(&self) {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
             self.lights.lock().await;
+
         lights.set_on_off3(self.red, false, self.green, false, self.beeper, false);
 
         self.old_promise.store(false, Ordering::Relaxed);
@@ -152,6 +155,7 @@ impl PedestrianLights {
     async fn go_yield_flash(&self) {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
             self.lights.lock().await;
+
         lights.set_on_off3(self.red, false, self.green, false, self.beeper, false);
 
         self.old_promise.store(false, Ordering::Relaxed);
@@ -162,20 +166,17 @@ impl PedestrianLights {
     async fn go_yield(&self) {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
             self.lights.lock().await;
-        lights.set_on_off(self.red, false);
-
         let active_old_promise =
             self.active.load(Ordering::Relaxed) && self.old_promise.load(Ordering::Relaxed);
-        lights.set_pin(self.beeper, active_old_promise, true, true, false);
-        lights.set_pin(self.green, active_old_promise, true, false, false);
 
-        self.old_promise.store(false, Ordering::Relaxed);
-        self.promise_made.store(false, Ordering::Relaxed);
-        lights.set_on_off(self.promise, false);
+        lights.set_pin(self.beeper, active_old_promise, true, true, false);
+        lights.set_on_off(self.red, !active_old_promise);
+        lights.set_pin(self.green, active_old_promise, true, false, false);
     }
     async fn go_clear(&self) {
         let mut lights: MutexGuard<'_, ThreadModeRawMutex, TimedOutputMasker> =
             self.lights.lock().await;
+
         lights.set_on_off2(self.red, true, self.green, false);
         lights.set_on_off(self.beeper, false);
     }
